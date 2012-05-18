@@ -107,6 +107,7 @@ pass("Created a ton of files");
 # If there is anything left w/ a devid that we rebalance away from, there would
 # be a failure when the HTTP delete happens simultaenously to the replication.
 # This will manifest as subtest 48 failing often...
+#queue_stats("Pre Files to replicate");
 {
     my $iters = 30;
     my ($to_repl_rows, $to_queue_rows);
@@ -121,6 +122,7 @@ pass("Created a ton of files");
     die "Failed to replicate all $n_files files" if $to_repl_rows || $to_queue_rows;
     pass("Replicated all $n_files files");
 }
+#queue_stats("Post Files to replicate");
 
 # Create a rebalance object and test a few things.
 use MogileFS::Device;
@@ -158,10 +160,10 @@ my ($devfids, $devfids2, $saved_state);
 my $rebal_pol = "from_hosts=1 fid_age=old limit_type=device limit_by=none to_all_devs=0 to_hosts=3 leave_in_drain_mode=0";
 eval {
     my $rebal = MogileFS::Rebalance->new;
-    ok($rebal->policy($rebal_pol));
-    ok($rebal->init(\@devs));
-    ok($devfids = $rebal->next_fids_to_rebalance(\@devs, $sto, 5));
-    ok($devfids2 = $rebal->next_fids_to_rebalance(\@devs, $sto, 8));
+    ok($rebal->policy($rebal_pol), "Set rebalance policy");
+    ok($rebal->init(\@devs), "Set rebalance devices");
+    ok($devfids = $rebal->next_fids_to_rebalance(\@devs, $sto, 5), "Rebalance - batch 1");
+    ok($devfids2 = $rebal->next_fids_to_rebalance(\@devs, $sto, 8), "Rebalance - batch 2");
     ok($saved_state = $rebal->save_state);
 #    print Dumper($rebal), "\n";
 };
@@ -176,9 +178,9 @@ if ($@) {
 $devfids2 = undef;
 eval {
     my $rebal = MogileFS::Rebalance->new;
-    ok($rebal->policy($rebal_pol));
-    ok($rebal->load_state($saved_state));
-    ok($devfids2 = $rebal->next_fids_to_rebalance(\@devs, $sto, 3));
+    ok($rebal->policy($rebal_pol),"Set rebalance policy #2");
+    ok($rebal->load_state($saved_state), "Load rebalance state");
+    ok($devfids2 = $rebal->next_fids_to_rebalance(\@devs, $sto, 3), "Rebalance - batch 3");
 #    print Dumper($rebal), "\n";
 };
 if ($@) {
@@ -202,35 +204,39 @@ my $moga = MogileFS::Admin->new(
                                  hosts  => [ "127.0.0.1:7001" ],
                                  );
 
-ok(! defined $moga->rebalance_stop);
+ok(! defined $moga->rebalance_stop, "Rebalance stop");
 my $res;
 
 # Quickly test the "no dupes" policy.
 # ensures that source devices are properly filtered.
 my $rebal_pol_dupes = "from_devices=1";
-ok($res = $moga->rebalance_set_policy($rebal_pol_dupes));
+ok($res = $moga->rebalance_set_policy($rebal_pol_dupes), "Set rebalance policy #3");
 if (! defined $res) {
     print "Admin error: ", $moga->errstr, "\n";
 }
-ok($res = $moga->rebalance_test);
+ok($res = $moga->rebalance_test, "Rebalance test");
 {
     for my $dev (sort split /,/, $res->{ddevs}) {
         ok($dev != 1);
     }
 }
 
-ok($res = $moga->rebalance_set_policy($rebal_pol));
+ok($res = $moga->rebalance_set_policy($rebal_pol), "Set rebalance policy #4");
 if (! defined $res) {
     print "Admin error: ", $moga->errstr, "\n";
 }
-ok($res = $moga->rebalance_test);
+ok($res = $moga->rebalance_test, "Rebalance test #2");
 #print "Test result: ", Dumper($res), "\n\n";
-ok(! defined $moga->rebalance_status);
+ok(! defined $moga->rebalance_status, "Rebalance status");
 if (! defined $res) {
     print "Admin error: ", $moga->errstr, "\n";
 }
 #print "Status results: ", Dumper($res), "\n\n";
-ok($res = $moga->rebalance_start);
+#queue_stats("Pre Files to rebalance (n=6)");
+#file_on_distrib_stats("Pre files to rebalance (n=6)");
+
+
+ok($res = $moga->rebalance_start, "Rebalance start");
 if (! defined $res) {
     print "Admin error: ", $moga->errstr, "\n";
 }
@@ -243,6 +249,7 @@ if ($res) {
 # not have seen the start request yet. Lowered the sleep from 5 to 3.
 sleep 3;
 
+#queue_stats("Pre Files to rebalance");
 {
     my $iters = 30;
     my ($to_repl_rows, $to_queue_rows);
@@ -252,11 +259,13 @@ sleep 3;
         $to_queue_rows = $dbh->selectrow_array("SELECT COUNT(*) FROM file_to_queue");
         last if $to_repl_rows eq 0 && $to_queue_rows eq 0;
         diag("Files to rebalance: file_to_replicate=$to_repl_rows file_to_queue=$to_queue_rows");
+		#file_on_distrib_stats("Rebalancing, iters=$iters");
         sleep 1;
     }
     die "Failed to rebalance all files" if $to_repl_rows || $to_queue_rows;
     pass("Replicated all files");
 }
+#queue_stats("Post Files to rebalance");
 
 # TODO: Verify that files moved from devs 1,2 to 5,6
 # select devid, count(*) from file_on group by devid;
@@ -276,4 +285,26 @@ sub try_for {
         sleep 1;
     }
     return 0;
+}
+
+sub queue_stats {
+	my $msg = shift;
+	$msg .= ":";
+	foreach my $tbl qw(file_to_delete file_to_replicate file_to_delete_later file_to_queue file_to_delete2) {
+		my $count = $dbh->selectrow_array("SELECT COUNT(*) FROM ".$tbl);
+		$msg .= sprintf(" %s=%d", $tbl, $count);
+	}
+	warn "$msg";
+}
+
+sub file_on_distrib_stats {
+	my $msg = shift;
+	my $q = "SELECT devid,COUNT(fid) FROM file_on GROUP BY 1 ORDER BY 1";
+	my $sth = $dbh->prepare($q);
+	$sth->execute();
+	$msg .= ' file_on:';
+	while (my @row = $sth->fetchrow_array ) {
+		$msg .= sprintf " dev%d=%d",$row[0],$row[1];
+	}
+	warn $msg;
 }
